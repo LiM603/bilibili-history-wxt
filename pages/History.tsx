@@ -455,7 +455,9 @@ export const History: React.FC = () => {
             aria-hidden={!isToolbarExpanded}
             inert={!isToolbarExpanded}
           >
-            <div className="min-h-0 overflow-hidden">
+            <div
+              className={`min-h-0 ${isToolbarExpanded ? "overflow-visible" : "overflow-hidden"}`}
+            >
               <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
                 <div
                   className="group relative flex h-10 min-w-0 flex-1 items-center rounded-lg border border-gray-200 bg-gray-50 transition-colors focus-within:border-pink-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-pink-100 dark:border-neutral-700 dark:bg-neutral-900 dark:focus-within:border-pink-500 dark:focus-within:ring-pink-500/20"

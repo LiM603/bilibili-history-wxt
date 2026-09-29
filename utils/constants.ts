@@ -102,6 +102,11 @@ export const THEME_MODE = "themeMode";
 
 export const UPDATE_HISTORY = [
   {
+    date: "2026-09-13",
+    version: "2.2.3",
+    changes: ["修复历史记录页面的分类筛选和日期选择弹层无法显示的问题"],
+  },
+  {
     date: "2026-09-12",
     version: "2.2.2",
     changes: [

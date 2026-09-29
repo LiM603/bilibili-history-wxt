@@ -97,9 +97,7 @@ export const loadWebDavConfig = async (): Promise<WebDavConfig | null> => {
 
 /** 保存 WebDAV 配置前加密密码，返回可直接写入 storage 的配置对象 */
 export const sealWebDavConfig = async (config: WebDavConfig): Promise<WebDavConfig> => {
-  const password = config.password
-    ? ENCRYPTED_PREFIX + (await encryptSecret(config.password))
-    : "";
+  const password = config.password ? ENCRYPTED_PREFIX + (await encryptSecret(config.password)) : "";
   return { ...config, password };
 };
 
@@ -123,9 +121,7 @@ export const withWebDavOperationLock = async <T>(task: () => Promise<T>): Promis
   const renewInterval = setInterval(() => {
     void (async () => {
       const latest = await browser.storage.local.get(WEBDAV_OPERATION_LOCK);
-      const currentLock = latest[WEBDAV_OPERATION_LOCK] as
-        | { owner?: string }
-        | undefined;
+      const currentLock = latest[WEBDAV_OPERATION_LOCK] as { owner?: string } | undefined;
       if (currentLock?.owner === owner) {
         await browser.storage.local.set({
           [WEBDAV_OPERATION_LOCK]: { owner, expiresAt: Date.now() + LOCK_TTL_MS },
