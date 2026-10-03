@@ -51,6 +51,7 @@ import {
   downloadFile,
   withWebDavOperationLock,
   loadWebDavConfig,
+  clearStaleWebDavOperationLock,
 } from "../utils/webdav";
 import {
   FavoriteFolder,
@@ -222,6 +223,11 @@ export default defineBackground(() => {
 
   void ensureLocalHistoryBackupAlarm().catch((error) => {
     console.error("初始化历史记录本地备份定时任务失败:", error);
+  });
+
+  // 清理上次被回收时遗留的 WebDAV 操作锁，避免死锁卡住后续自动同步。
+  void clearStaleWebDavOperationLock().catch((error) => {
+    console.error("清理 WebDAV 操作锁失败:", error);
   });
 
   const actionApi = browser.action ?? browser.browserAction;

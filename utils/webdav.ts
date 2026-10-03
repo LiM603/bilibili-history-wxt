@@ -102,10 +102,20 @@ export const sealWebDavConfig = async (config: WebDavConfig): Promise<WebDavConf
 };
 
 const WEBDAV_OPERATION_LOCK = "webdavOperationLock";
-// 静态 TTL 仅作为续期定时器失效（如扩展被休眠）时的兜底。
-// 正常运行期间由 RENEW_INTERVAL_MS 动态续期，长任务不会被误判为过期。
-const LOCK_TTL_MS = 10 * 60 * 1000;
-const RENEW_INTERVAL_MS = 60 * 1000;
+// 续期间隔必须小于 MV3 Service Worker 约 30s 的空闲回收阈值，否则后台长任务
+// 会在两次续期之间被浏览器回收，留下无人释放的锁（这正是自动同步长传输失败的根因）。
+const RENEW_INTERVAL_MS = 20 * 1000;
+// 锁 TTL 略大于续期间隔即可：任务被回收后能较快自动过期，避免死锁卡住后续同步。
+const LOCK_TTL_MS = 60 * 1000;
+
+/** 清理已过期（owner 已不存在）的 WebDAV 操作锁，供 Service Worker 启动时调用。 */
+export const clearStaleWebDavOperationLock = async (): Promise<void> => {
+  const current = await browser.storage.local.get(WEBDAV_OPERATION_LOCK);
+  const lock = current[WEBDAV_OPERATION_LOCK] as { owner?: string; expiresAt?: number } | undefined;
+  if (lock && typeof lock.expiresAt === "number" && lock.expiresAt <= Date.now()) {
+    await browser.storage.local.remove(WEBDAV_OPERATION_LOCK);
+  }
+};
 
 export const withWebDavOperationLock = async <T>(task: () => Promise<T>): Promise<T> => {
   const owner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -118,6 +128,7 @@ export const withWebDavOperationLock = async <T>(task: () => Promise<T>): Promis
     [WEBDAV_OPERATION_LOCK]: { owner, expiresAt: Date.now() + LOCK_TTL_MS },
   });
 
+  // 20s 心跳：storage API 调用会重置 SW 空闲计时器，既续期锁又保活，避免长传输中途被回收。
   const renewInterval = setInterval(() => {
     void (async () => {
       const latest = await browser.storage.local.get(WEBDAV_OPERATION_LOCK);
@@ -184,19 +195,52 @@ export const PREV_VERSION_SUFFIX = ".prev";
 /** 校验信息 sidecar 文件后缀（P2） */
 export const META_SUFFIX = ".meta";
 
+/** 单个 WebDAV 请求超时，避免网络卡死时占着锁一直等到调用方被回收 */
+const REQUEST_TIMEOUT_MS = 180 * 1000;
+
 interface WebDavFileMeta {
+  /** 解压后的原始字节数 */
   size: number;
+  /** 解压后内容的 sha256 */
   sha256: string;
+  /** 传输编码 */
+  encoding?: "gzip" | "identity";
+  /** 实际传输（编码后）的字节数 */
+  compressedSize?: number;
   updatedAt: number;
 }
 
-const toByteLength = (text: string): number => new TextEncoder().encode(text).byteLength;
-
-const computeSha256 = async (text: string): Promise<string> => {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+const sha256Bytes = async (bytes: Uint8Array): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+};
+
+const toByteLength = (text: string): number => new TextEncoder().encode(text).byteLength;
+
+// 仅用于读取早期版本写入的 gzip 备份；新上传一律明文。
+const isGzipBytes = (bytes: Uint8Array): boolean =>
+  bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+
+const gunzipBytes = async (bytes: Uint8Array): Promise<Uint8Array> => {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+};
+
+/** 带超时的 fetch，避免请求卡死时无限占用锁并等到 SW 被回收。 */
+const fetchWithTimeout = async (
+  url: string,
+  init: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 /**
@@ -208,7 +252,7 @@ export const getRemoteFileSize = async (
   filename: string,
 ): Promise<number | null> => {
   try {
-    const response = await fetch(getFullUrl(config, filename), {
+    const response = await fetchWithTimeout(getFullUrl(config, filename), {
       method: "PROPFIND",
       headers: {
         ...getAuthHeaders(config),
@@ -238,7 +282,7 @@ export const copyRemoteFile = async (
   destination: string,
 ): Promise<boolean> => {
   try {
-    const response = await fetch(getFullUrl(config, source), {
+    const response = await fetchWithTimeout(getFullUrl(config, source), {
       method: "COPY",
       headers: {
         ...getAuthHeaders(config),
@@ -259,7 +303,7 @@ const downloadFileMeta = async (
   filename: string,
 ): Promise<WebDavFileMeta | null> => {
   try {
-    const response = await fetch(getFullUrl(config, `${filename}${META_SUFFIX}`), {
+    const response = await fetchWithTimeout(getFullUrl(config, `${filename}${META_SUFFIX}`), {
       method: "GET",
       headers: {
         ...getAuthHeaders(config),
@@ -283,7 +327,7 @@ const downloadFileMeta = async (
 export const testConnection = async (config: WebDavConfig): Promise<boolean> => {
   try {
     const url = getFullUrl(config);
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: "PROPFIND",
       headers: {
         ...getAuthHeaders(config),
@@ -307,7 +351,7 @@ export const testConnection = async (config: WebDavConfig): Promise<boolean> => 
 export const ensureDirectory = async (config: WebDavConfig): Promise<boolean> => {
   try {
     const url = getFullUrl(config);
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: "MKCOL",
       headers: getAuthHeaders(config),
     });
@@ -333,13 +377,13 @@ export const uploadFile = async (
   data: string,
 ): Promise<boolean> => {
   try {
-    const url = getFullUrl(config, filename);
-    const expectedSize = toByteLength(data);
+    const plainBytes = new TextEncoder().encode(data);
+    const expectedSize = plainBytes.byteLength;
 
     // 覆盖前保留上一版本（尽力而为：源文件不存在或服务端不支持 COPY 时忽略）
     await copyRemoteFile(config, filename, `${filename}${PREV_VERSION_SUFFIX}`);
 
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(getFullUrl(config, filename), {
       method: "PUT",
       headers: {
         ...getAuthHeaders(config),
@@ -363,14 +407,16 @@ export const uploadFile = async (
       return false;
     }
 
-    // 写入校验信息 sidecar，供下载端核对完整性（失败不阻断主流程）
+    // 写入校验信息 sidecar（记录解压后的大小与哈希），供下载端核对完整性
     try {
       const meta: WebDavFileMeta = {
         size: expectedSize,
-        sha256: await computeSha256(data),
+        sha256: await sha256Bytes(plainBytes),
+        encoding: "identity",
+        compressedSize: expectedSize,
         updatedAt: Date.now(),
       };
-      await fetch(getFullUrl(config, `${filename}${META_SUFFIX}`), {
+      await fetchWithTimeout(getFullUrl(config, `${filename}${META_SUFFIX}`), {
         method: "PUT",
         headers: {
           ...getAuthHeaders(config),
@@ -401,7 +447,7 @@ export const downloadFile = async (
 ): Promise<string | null> => {
   try {
     const url = getFullUrl(config, filename);
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: "GET",
       headers: {
         ...getAuthHeaders(config),
@@ -418,25 +464,32 @@ export const downloadFile = async (
       throw new Error(`WebDAV 下载文件 ${filename} 失败: HTTP ${response.status}`);
     }
 
-    const text = await response.text();
+    const transferBytes = new Uint8Array(await response.arrayBuffer());
 
-    // 传输完整性校验：响应声明的长度必须与实际字节数一致
-    // 仅在校验非压缩响应时比较，避免 compressed-length 与解压后长度不等造成误报
+    // 传输完整性校验：非压缩响应下，声明长度必须与实际传输字节数一致
     const contentEncoding = response.headers.get("content-encoding");
     const declaredLength = response.headers.get("content-length");
     if (declaredLength !== null && (!contentEncoding || contentEncoding === "identity")) {
       const expected = Number(declaredLength);
-      const actual = toByteLength(text);
-      if (Number.isFinite(expected) && expected !== actual) {
+      if (Number.isFinite(expected) && expected !== transferBytes.byteLength) {
         throw new Error(
-          `WebDAV 下载文件 ${filename} 不完整: 声明 ${expected} 字节，实际 ${actual} 字节`,
+          `WebDAV 下载文件 ${filename} 不完整: 声明 ${expected} 字节，实际 ${transferBytes.byteLength} 字节`,
         );
       }
     }
 
-    // 如存在 sidecar 校验信息，核对哈希；不一致只告警，交由上层尝试修复
+    // 兼容明文与 gzip：靠 magic bytes 自动识别，旧备份（明文）也能直接读
+    const contentBytes = isGzipBytes(transferBytes)
+      ? await gunzipBytes(transferBytes)
+      : transferBytes;
+    const text = new TextDecoder().decode(contentBytes);
+
+    // 如存在 sidecar 校验信息，核对解压后的大小与哈希；不一致只告警，交由上层尝试修复
     const meta = await downloadFileMeta(config, filename);
-    if (meta && (meta.size !== toByteLength(text) || meta.sha256 !== (await computeSha256(text)))) {
+    if (
+      meta &&
+      (meta.size !== contentBytes.byteLength || meta.sha256 !== (await sha256Bytes(contentBytes)))
+    ) {
       console.warn(`WebDAV 下载文件 ${filename} 校验信息不匹配，内容可能已损坏`);
     }
 
