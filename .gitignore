@@ -26,3 +26,6 @@ stats-*.json
 *.njsproj
 *.sln
 *.sw?
+
+# 本地测试/诊断数据，不入库
+tb/

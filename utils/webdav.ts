@@ -170,6 +170,113 @@ const getFullUrl = (config: WebDavConfig, filename?: string): string => {
 };
 
 /**
+ * WebDAV 的 GET/PROPFIND 必须始终反映服务器最新状态。
+ * 部分服务端只返回 Last-Modified/ETag 而不给 Cache-Control，浏览器会启用启发式缓存，
+ * 导致反复读到过期甚至损坏的旧文件（参见 issue #33）。这里统一禁用缓存。
+ */
+const NO_CACHE_HEADERS: Record<string, string> = {
+  "Cache-Control": "no-cache, no-store, must-revalidate",
+  Pragma: "no-cache",
+};
+
+/** 覆盖前保留的上一版本文件后缀（P2） */
+export const PREV_VERSION_SUFFIX = ".prev";
+/** 校验信息 sidecar 文件后缀（P2） */
+export const META_SUFFIX = ".meta";
+
+interface WebDavFileMeta {
+  size: number;
+  sha256: string;
+  updatedAt: number;
+}
+
+const toByteLength = (text: string): number => new TextEncoder().encode(text).byteLength;
+
+const computeSha256 = async (text: string): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+};
+
+/**
+ * 读取远端文件大小（PROPFIND Depth:0，解析 getcontentlength）。
+ * 文件不存在或无法解析时返回 null。
+ */
+export const getRemoteFileSize = async (
+  config: WebDavConfig,
+  filename: string,
+): Promise<number | null> => {
+  try {
+    const response = await fetch(getFullUrl(config, filename), {
+      method: "PROPFIND",
+      headers: {
+        ...getAuthHeaders(config),
+        ...NO_CACHE_HEADERS,
+        Depth: "0",
+      },
+      cache: "no-store",
+    });
+    if (response.status === 404) return null;
+    if (response.status !== 207 && !response.ok) return null;
+    const xml = await response.text();
+    const match = xml.match(/<[^>]*getcontentlength[^>]*>(\d+)</i);
+    return match ? Number(match[1]) : null;
+  } catch (error) {
+    console.warn(`WebDAV 获取远端文件大小 ${filename} 失败:`, error);
+    return null;
+  }
+};
+
+/**
+ * 远端复制文件（WebDAV COPY），用于覆盖前保留上一版本。
+ * 源文件不存在或服务端不支持 COPY 时返回 false。
+ */
+export const copyRemoteFile = async (
+  config: WebDavConfig,
+  source: string,
+  destination: string,
+): Promise<boolean> => {
+  try {
+    const response = await fetch(getFullUrl(config, source), {
+      method: "COPY",
+      headers: {
+        ...getAuthHeaders(config),
+        Destination: getFullUrl(config, destination),
+        Overwrite: "T",
+      },
+      cache: "no-store",
+    });
+    return response.status === 200 || response.status === 201 || response.status === 204;
+  } catch (error) {
+    console.warn(`WebDAV 复制文件 ${source} -> ${destination} 失败:`, error);
+    return false;
+  }
+};
+
+const downloadFileMeta = async (
+  config: WebDavConfig,
+  filename: string,
+): Promise<WebDavFileMeta | null> => {
+  try {
+    const response = await fetch(getFullUrl(config, `${filename}${META_SUFFIX}`), {
+      method: "GET",
+      headers: {
+        ...getAuthHeaders(config),
+        ...NO_CACHE_HEADERS,
+      },
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const parsed = JSON.parse(await response.text()) as WebDavFileMeta;
+    if (typeof parsed?.size !== "number" || typeof parsed?.sha256 !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+/**
  * 测试 WebDAV 连接
  * @returns true 表示连接成功
  */
@@ -180,8 +287,10 @@ export const testConnection = async (config: WebDavConfig): Promise<boolean> => 
       method: "PROPFIND",
       headers: {
         ...getAuthHeaders(config),
+        ...NO_CACHE_HEADERS,
         Depth: "0",
       },
+      cache: "no-store",
     });
     // 207 Multi-Status 表示成功
     // 404 表示路径不存在但连接正常（后续会自动创建）
@@ -225,16 +334,57 @@ export const uploadFile = async (
 ): Promise<boolean> => {
   try {
     const url = getFullUrl(config, filename);
+    const expectedSize = toByteLength(data);
+
+    // 覆盖前保留上一版本（尽力而为：源文件不存在或服务端不支持 COPY 时忽略）
+    await copyRemoteFile(config, filename, `${filename}${PREV_VERSION_SUFFIX}`);
+
     const response = await fetch(url, {
       method: "PUT",
       headers: {
         ...getAuthHeaders(config),
         "Content-Type": "application/json; charset=utf-8",
+        ...NO_CACHE_HEADERS,
       },
       body: data,
+      cache: "no-store",
     });
     // 201 Created 或 204 No Content 表示成功
-    return response.status === 201 || response.status === 204 || response.status === 200;
+    if (!(response.status === 201 || response.status === 204 || response.status === 200)) {
+      return false;
+    }
+
+    // 上传后校验远端大小：避免中断写入半截文件却当作成功
+    const remoteSize = await getRemoteFileSize(config, filename);
+    if (remoteSize !== null && remoteSize !== expectedSize) {
+      console.error(
+        `WebDAV 上传文件 ${filename} 校验失败: 远端 ${remoteSize} 字节，本地 ${expectedSize} 字节`,
+      );
+      return false;
+    }
+
+    // 写入校验信息 sidecar，供下载端核对完整性（失败不阻断主流程）
+    try {
+      const meta: WebDavFileMeta = {
+        size: expectedSize,
+        sha256: await computeSha256(data),
+        updatedAt: Date.now(),
+      };
+      await fetch(getFullUrl(config, `${filename}${META_SUFFIX}`), {
+        method: "PUT",
+        headers: {
+          ...getAuthHeaders(config),
+          "Content-Type": "application/json; charset=utf-8",
+          ...NO_CACHE_HEADERS,
+        },
+        body: JSON.stringify(meta),
+        cache: "no-store",
+      });
+    } catch (metaError) {
+      console.warn(`WebDAV 写入校验信息 ${filename}${META_SUFFIX} 失败:`, metaError);
+    }
+
+    return true;
   } catch (error) {
     console.error(`WebDAV 上传文件 ${filename} 失败:`, error);
     return false;
@@ -253,7 +403,11 @@ export const downloadFile = async (
     const url = getFullUrl(config, filename);
     const response = await fetch(url, {
       method: "GET",
-      headers: getAuthHeaders(config),
+      headers: {
+        ...getAuthHeaders(config),
+        ...NO_CACHE_HEADERS,
+      },
+      cache: "no-store",
     });
 
     if (response.status === 404) {
@@ -264,7 +418,29 @@ export const downloadFile = async (
       throw new Error(`WebDAV 下载文件 ${filename} 失败: HTTP ${response.status}`);
     }
 
-    return await response.text();
+    const text = await response.text();
+
+    // 传输完整性校验：响应声明的长度必须与实际字节数一致
+    // 仅在校验非压缩响应时比较，避免 compressed-length 与解压后长度不等造成误报
+    const contentEncoding = response.headers.get("content-encoding");
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength !== null && (!contentEncoding || contentEncoding === "identity")) {
+      const expected = Number(declaredLength);
+      const actual = toByteLength(text);
+      if (Number.isFinite(expected) && expected !== actual) {
+        throw new Error(
+          `WebDAV 下载文件 ${filename} 不完整: 声明 ${expected} 字节，实际 ${actual} 字节`,
+        );
+      }
+    }
+
+    // 如存在 sidecar 校验信息，核对哈希；不一致只告警，交由上层尝试修复
+    const meta = await downloadFileMeta(config, filename);
+    if (meta && (meta.size !== toByteLength(text) || meta.sha256 !== (await computeSha256(text)))) {
+      console.warn(`WebDAV 下载文件 ${filename} 校验信息不匹配，内容可能已损坏`);
+    }
+
+    return text;
   } catch (error) {
     console.error(`WebDAV 下载文件 ${filename} 失败:`, error);
     throw error;

@@ -44,7 +44,7 @@ const Welcome = () => {
               <li>突破 Bilibili 历史记录的数量限制</li>
               <li>支持按时间排序浏览历史记录</li>
               <li>支持搜索历史记录</li>
-              <li>每隔1分钟自动增量的同步一次历史记录</li>
+              <li>每隔60分钟自动增量的同步一次历史记录</li>
               <li>所有数据都存储在本地indexedDB</li>
             </ul>
           </section>

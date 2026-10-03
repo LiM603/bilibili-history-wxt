@@ -331,3 +331,39 @@ export const runLocalHistoryBackup = async (
     cleanupWarning: cleanupWarning || undefined,
   };
 };
+
+/**
+ * 将即将上传到 WebDAV 的文件在本地备份目录中保留一份快照（P2 本地兜底）。
+ * 目录未配置/未授权或不可用时返回 false，绝不阻断同步主流程。
+ */
+export const writeLocalWebDavSnapshot = async (
+  fileName: string,
+  json: string,
+): Promise<boolean> => {
+  try {
+    const directoryHandle = await getLocalBackupDirectoryHandle();
+    if (!directoryHandle) return false;
+    const permission = await directoryHandle.queryPermission({ mode: "readwrite" });
+    if (permission !== "granted") return false;
+    const snapshotDir = await directoryHandle.getDirectoryHandle("webdav-snapshots", {
+      create: true,
+    });
+    const fileHandle = await snapshotDir.getFileHandle(fileName, { create: true });
+    const writable = await fileHandle.createWritable();
+    try {
+      await writable.write(json);
+      await writable.close();
+    } catch (error) {
+      try {
+        await writable.abort();
+      } catch {
+        // 保留原始写入错误。
+      }
+      throw error;
+    }
+    return true;
+  } catch (error) {
+    console.warn(`写入 WebDAV 本地快照 ${fileName} 失败:`, error);
+    return false;
+  }
+};

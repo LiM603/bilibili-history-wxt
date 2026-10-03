@@ -3,6 +3,7 @@ import {
   HAS_FULL_FAV_SYNC,
   HISTORY_LAST_SYNC,
   SYNC_INTERVAL,
+  DEFAULT_SYNC_INTERVAL,
   IS_SYNC_DELETE_FROM_BILIBILI,
   WEBDAV_LAST_SYNC,
   WEBDAV_AUTO_SYNC_ENABLED,
@@ -70,6 +71,7 @@ import {
   HistoryItem,
 } from "../utils/types";
 import { isLocalHistoryBackupDue, runLocalHistoryBackup } from "../utils/localHistoryBackup";
+import { parseJsonWithRepair } from "../utils/jsonRepair";
 
 const FAVORITE_FOLDER_RATE_LIMIT_COOLDOWNS_MS = [10, 30, 60].map((minutes) => minutes * 60 * 1000);
 const FAVORITE_FOLDER_PAGE_DELAY_MIN_MS = 1500;
@@ -288,7 +290,7 @@ export default defineBackground(() => {
   browser.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === "syncHistory") {
       // 获取同步间隔
-      const syncInterval = await getStorageValue(SYNC_INTERVAL, 1);
+      const syncInterval = await getStorageValue(SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL);
       // 根据最近一次成功同步的时间判断是否需要同步
       const lastSyncTime = await getStorageValue<number>(HISTORY_LAST_SYNC, 0);
       const elapsed = Date.now() - lastSyncTime;
@@ -1800,44 +1802,65 @@ export default defineBackground(() => {
       console.log("[WebDAV 同步] 步骤 1/2：拉取并合并远端数据...");
       const deletedHistoryIds = await getDeletedHistoryIds();
       for (const item of items) {
-        const remote = await downloadFile(config, item.file);
-        if (remote) {
-          if (item.key === "history") {
-            await smartMergeHistory(JSON.parse(remote), deletedHistoryIds);
-          } else {
-            await item.merge(JSON.parse(remote));
+        try {
+          const remote = await downloadFile(config, item.file);
+          if (remote) {
+            if (item.key === "history") {
+              const parsed = parseJsonWithRepair<HistoryItem[]>(remote);
+              if (parsed.repaired) console.warn("远端 history.json 不完整，已修复后合并");
+              await smartMergeHistory(parsed.data, deletedHistoryIds);
+            } else {
+              const parsed = parseJsonWithRepair<any[]>(remote);
+              if (parsed.repaired) console.warn(`远端 ${item.file} 不完整，已修复后合并`);
+              await item.merge(parsed.data);
+            }
           }
-        }
-        if (item.key === "history") {
-          const remoteV2 = await downloadFile(config, "history-v2.json");
-          if (remoteV2) await mergeHistoryV2Backup(JSON.parse(remoteV2));
+          if (item.key === "history") {
+            const remoteV2 = await downloadFile(config, "history-v2.json");
+            if (remoteV2) {
+              const parsedV2 =
+                parseJsonWithRepair<Parameters<typeof mergeHistoryV2Backup>[0]>(remoteV2);
+              if (parsedV2.repaired) console.warn("远端 history-v2.json 不完整，已修复后合并");
+              await mergeHistoryV2Backup(parsedV2.data);
+            }
+          }
+        } catch (error) {
+          console.warn(`拉取${item.label}失败，已跳过:`, error);
         }
       }
 
       // ===== 第二步：将合并后的最新本地数据推送到远端 =====
       console.log("[WebDAV 同步] 步骤 2/2：推送本地数据到远端...");
       const summary: string[] = [];
+      let pushFailed = false;
       for (const item of items) {
-        const data = await item.getAll();
-        if (item.key === "history") {
-          const v2 = await getHistoryV2Backup();
-          if (!(await uploadFile(config, "history-v2.json", JSON.stringify(v2)))) {
-            throw new Error("WebDAV 上传历史 v2 失败");
+        try {
+          const data = await item.getAll();
+          if (item.key === "history") {
+            const v2 = await getHistoryV2Backup();
+            if (!(await uploadFile(config, "history-v2.json", JSON.stringify(v2)))) {
+              throw new Error("WebDAV 上传历史 v2 失败");
+            }
           }
-        }
-        if (!(await uploadFile(config, item.file, JSON.stringify(data)))) {
-          throw new Error(`WebDAV 上传${item.label}失败`);
-        }
-        if (item.key === "history") {
-          const v2 = await getHistoryV2Backup();
-          summary.push(`${item.label} ${data.length} 个内容 / ${v2.events.length} 次观看`);
-        } else {
-          summary.push(`${item.label} ${data.length}`);
+          if (!(await uploadFile(config, item.file, JSON.stringify(data)))) {
+            throw new Error(`WebDAV 上传${item.label}失败`);
+          }
+          if (item.key === "history") {
+            const v2 = await getHistoryV2Backup();
+            summary.push(`${item.label} ${data.length} 个内容 / ${v2.events.length} 次观看`);
+          } else {
+            summary.push(`${item.label} ${data.length}`);
+          }
+        } catch (error) {
+          pushFailed = true;
+          console.warn(`推送${item.label}失败:`, error);
         }
       }
 
-      // 同步完成，记录时间戳
-      await setStorageValue(WEBDAV_LAST_SYNC, Date.now());
+      // 同步完成，记录时间戳；若存在推送失败则不更新时间，便于下个周期尽快重试
+      if (!pushFailed) {
+        await setStorageValue(WEBDAV_LAST_SYNC, Date.now());
+      }
 
       console.log(`WebDAV 双向同步完成：${summary.join("，")}`);
     } catch (error) {

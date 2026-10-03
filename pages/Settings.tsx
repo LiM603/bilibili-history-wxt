@@ -5,6 +5,7 @@ import { getStorageValue, setStorageValue } from "../utils/storage";
 import {
   IS_SYNC_DELETE,
   SYNC_INTERVAL,
+  DEFAULT_SYNC_INTERVAL,
   IS_SYNC_DELETE_FROM_BILIBILI,
   HIDE_USER_INFO,
   HIDDEN_MENUS,
@@ -33,7 +34,7 @@ const Settings = () => {
   const [isResetLoading, setIsResetLoading] = useState(false);
   const [resetStatus, setResetStatus] = useState("");
 
-  const [syncInterval, setSyncInterval] = useState<number | string>(1);
+  const [syncInterval, setSyncInterval] = useState<number | string>(DEFAULT_SYNC_INTERVAL);
   const [storageHealth, setStorageHealth] = useState<StorageHealthReport | null>(null);
   const [isCheckingStorage, setIsCheckingStorage] = useState(false);
   const [storageHealthError, setStorageHealthError] = useState("");
@@ -73,7 +74,7 @@ const Settings = () => {
       const syncDeleteFromBilibili = await getStorageValue(IS_SYNC_DELETE_FROM_BILIBILI, false);
       const hideUserInfo = await getStorageValue(HIDE_USER_INFO, false);
       const menus = await getStorageValue<string[]>(HIDDEN_MENUS, []);
-      const storedSyncInterval = await getStorageValue(SYNC_INTERVAL, 1);
+      const storedSyncInterval = await getStorageValue(SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL);
       const storedDateMode = await getStorageValue(DATE_SELECTION_MODE, "range");
       const storedHistoryLoadMode = await getStorageValue(HISTORY_LOAD_MODE, "pagination");
       const migrationReport = await getStorageValue<{ skipped?: number }>(
@@ -383,7 +384,7 @@ const Settings = () => {
                   onBlur={() => {
                     const num = Number(syncInterval);
                     if (isNaN(num) || num < 1) {
-                      handleSyncIntervalChange(1);
+                      handleSyncIntervalChange(DEFAULT_SYNC_INTERVAL);
                     }
                   }}
                   className="w-16 text-center text-lg text-gray-700 dark:text-neutral-100 font-mono font-medium bg-transparent border-b border-transparent hover:border-gray-300 dark:hover:border-neutral-600 focus:border-fuchsia-500 outline-none transition-colors"

@@ -73,6 +73,8 @@ import {
   FavoriteFolder,
   SubscribedCollection,
 } from "@/utils/types";
+import { parseJsonWithRepair } from "@/utils/jsonRepair";
+import { writeLocalWebDavSnapshot } from "@/utils/localHistoryBackup";
 import { LocalHistoryBackupPanel } from "@/components/LocalHistoryBackupPanel";
 
 /** Per-dataset definition: remote file name, label, local reader, and remote-merge strategy */
@@ -146,14 +148,18 @@ const mergeRemoteHistoryFiles = async (
   const deletedHistoryIds = await getDeletedHistoryIds();
   const legacyRemote = await downloadFile(config, "history.json");
   if (legacyRemote) {
-    const result = await smartMergeHistory(JSON.parse(legacyRemote), deletedHistoryIds);
+    const parsed = parseJsonWithRepair<HistoryItem[]>(legacyRemote);
+    if (parsed.repaired) console.warn("远端 history.json 不完整，已修复后合并");
+    const result = await smartMergeHistory(parsed.data, deletedHistoryIds);
     merged += result.merged;
     skipped += result.skipped;
   }
 
   const v2Remote = await downloadFile(config, HISTORY_V2_FILE);
   if (v2Remote) {
-    const result = await mergeHistoryV2Backup(JSON.parse(v2Remote));
+    const parsed = parseJsonWithRepair<HistoryV2Backup>(v2Remote);
+    if (parsed.repaired) console.warn("远端 history-v2.json 不完整，已修复后合并");
+    const result = await mergeHistoryV2Backup(parsed.data);
     merged += result.merged;
     skipped += result.skipped;
   }
@@ -165,10 +171,14 @@ const uploadHistoryFiles = async (
 ): Promise<{ contentCount: number; eventCount: number }> => {
   const history = await getAllHistory();
   const v2 = await getHistoryV2Backup();
-  if (!(await uploadFile(config, HISTORY_V2_FILE, JSON.stringify(v2)))) {
+  const v2Json = JSON.stringify(v2);
+  const historyJson = JSON.stringify(history);
+  await writeLocalWebDavSnapshot(HISTORY_V2_FILE, v2Json);
+  await writeLocalWebDavSnapshot("history.json", historyJson);
+  if (!(await uploadFile(config, HISTORY_V2_FILE, v2Json))) {
     throw new Error("上传历史记录 v2 失败");
   }
-  if (!(await uploadFile(config, "history.json", JSON.stringify(history)))) {
+  if (!(await uploadFile(config, "history.json", historyJson))) {
     throw new Error("上传历史记录兼容文件失败");
   }
   return { contentCount: history.length, eventCount: v2.events.length };
@@ -343,7 +353,9 @@ const WebDavSync = () => {
               summary.push(`历史记录 ${counts.contentCount} 个内容 / ${counts.eventCount} 次观看`);
             } else {
               const data = await item.getAll();
-              const ok = await uploadFile(config, item.file, JSON.stringify(data));
+              const json = JSON.stringify(data);
+              await writeLocalWebDavSnapshot(item.file, json);
+              const ok = await uploadFile(config, item.file, json);
               if (!ok) throw new Error(`上传${item.label}失败`);
               summary.push(`${item.label} ${data.length} 条`);
             }
@@ -386,22 +398,32 @@ const WebDavSync = () => {
           setSyncProgress({ current: 0, total, message: "准备双向同步..." });
           if (!(await ensureDirectory(config))) throw new Error("WebDAV 备份目录创建失败");
 
-          // 第一步：拉取远端数据并合并
+          // 第一步：拉取远端数据并合并（单项失败不阻断其它数据项）
           let totalMerged = 0;
           let totalSkipped = 0;
+          const syncWarnings: string[] = [];
           for (const [i, item] of items.entries()) {
             setSyncProgress({ current: i, total, message: `步骤 1/2：拉取${item.label}...` });
-            if (item.key === "history") {
-              const result = await mergeRemoteHistoryFiles(config);
-              totalMerged += result.merged;
-              totalSkipped += result.skipped;
-            } else {
-              const remote = await downloadFile(config, item.file);
-              if (remote) {
-                const result = await item.merge(JSON.parse(remote));
+            try {
+              if (item.key === "history") {
+                const result = await mergeRemoteHistoryFiles(config);
                 totalMerged += result.merged;
                 totalSkipped += result.skipped;
+              } else {
+                const remote = await downloadFile(config, item.file);
+                if (remote) {
+                  const parsed = parseJsonWithRepair<any[]>(remote);
+                  if (parsed.repaired)
+                    syncWarnings.push(`${item.label} 远端文件不完整，已修复后合并`);
+                  const result = await item.merge(parsed.data);
+                  totalMerged += result.merged;
+                  totalSkipped += result.skipped;
+                }
               }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              console.warn(`拉取${item.label}失败，已跳过:`, error);
+              syncWarnings.push(`${item.label} 拉取失败：${message}`);
             }
           }
 
@@ -413,14 +435,22 @@ const WebDavSync = () => {
               total,
               message: `步骤 2/2：推送${item.label}...`,
             });
-            if (item.key === "history") {
-              const counts = await uploadHistoryFiles(config);
-              totalPushed += counts.eventCount;
-            } else {
-              const data = await item.getAll();
-              const ok = await uploadFile(config, item.file, JSON.stringify(data));
-              if (!ok) throw new Error(`上传${item.label}失败`);
-              totalPushed += data.length;
+            try {
+              if (item.key === "history") {
+                const counts = await uploadHistoryFiles(config);
+                totalPushed += counts.eventCount;
+              } else {
+                const data = await item.getAll();
+                const json = JSON.stringify(data);
+                await writeLocalWebDavSnapshot(item.file, json);
+                const ok = await uploadFile(config, item.file, json);
+                if (!ok) throw new Error(`上传${item.label}失败`);
+                totalPushed += data.length;
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              console.warn(`推送${item.label}失败:`, error);
+              syncWarnings.push(`${item.label} 推送失败：${message}`);
             }
           }
 
@@ -429,8 +459,11 @@ const WebDavSync = () => {
           setLastSync(now);
 
           setSyncProgress({ current: total, total, message: "双向同步完成！" });
+          const warningSuffix = syncWarnings.length
+            ? `；${syncWarnings.length} 项异常：${syncWarnings.join("；")}`
+            : "";
           toast.success(
-            `双向同步完成！合并 ${totalMerged} 条，跳过 ${totalSkipped} 条，推送 ${totalPushed} 条`,
+            `双向同步完成！合并 ${totalMerged} 条，跳过 ${totalSkipped} 条，推送 ${totalPushed} 条${warningSuffix}`,
           );
         }),
       );
@@ -465,23 +498,33 @@ const WebDavSync = () => {
           });
           let totalMerged = 0;
           let totalSkipped = 0;
+          const restoreWarnings: string[] = [];
           for (const [i, item] of items.entries()) {
             setSyncProgress({
               current: i,
               total: items.length,
               message: `正在恢复${item.label}...`,
             });
-            if (item.key === "history") {
-              const result = await mergeRemoteHistoryFiles(config);
-              totalMerged += result.merged;
-              totalSkipped += result.skipped;
-            } else {
-              const remote = await downloadFile(config, item.file);
-              if (remote) {
-                const result = await item.merge(JSON.parse(remote));
+            try {
+              if (item.key === "history") {
+                const result = await mergeRemoteHistoryFiles(config);
                 totalMerged += result.merged;
                 totalSkipped += result.skipped;
+              } else {
+                const remote = await downloadFile(config, item.file);
+                if (remote) {
+                  const parsed = parseJsonWithRepair<any[]>(remote);
+                  if (parsed.repaired)
+                    restoreWarnings.push(`${item.label} 远端文件不完整，已修复后合并`);
+                  const result = await item.merge(parsed.data);
+                  totalMerged += result.merged;
+                  totalSkipped += result.skipped;
+                }
               }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              console.warn(`恢复${item.label}失败，已跳过:`, error);
+              restoreWarnings.push(`${item.label} 恢复失败：${message}`);
             }
           }
 
@@ -491,7 +534,12 @@ const WebDavSync = () => {
           setLastSync(now);
 
           setSyncProgress({ current: items.length, total: items.length, message: "恢复完成！" });
-          toast.success(`恢复完成！合并 ${totalMerged} 条，跳过 ${totalSkipped} 条（本地更新）`);
+          const warningSuffix = restoreWarnings.length
+            ? `；${restoreWarnings.length} 项异常：${restoreWarnings.join("；")}`
+            : "";
+          toast.success(
+            `恢复完成！合并 ${totalMerged} 条，跳过 ${totalSkipped} 条（本地更新）${warningSuffix}`,
+          );
         }),
       );
     } catch (error: any) {

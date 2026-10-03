@@ -8,6 +8,9 @@ export const HISTORY_LAST_SYNC = "lastSync";
 
 export const SYNC_INTERVAL = "syncInterval";
 
+// 历史记录自动同步间隔（分钟），默认 60 分钟
+export const DEFAULT_SYNC_INTERVAL = 60;
+
 export const SYNC_TIME_REMAIN = "syncTimeRemain";
 
 export const FAV_AUTO_SYNC_ENABLED = "favAutoSyncEnabled"; // auto favorites sync switch, default false
@@ -101,6 +104,18 @@ export const DELETED_HISTORY_IDS = "deletedHistoryIds";
 export const THEME_MODE = "themeMode";
 
 export const UPDATE_HISTORY = [
+  {
+    date: "2026-10-03",
+    version: "2.2.4",
+    changes: [
+      "自用版：更名并独立部署，与官方商店版本区分",
+      "WebDAV 下载禁用 HTTP 缓存，避免反复读到过期或损坏的备份文件",
+      "WebDAV 下载校验文件长度与哈希，上传后校验远端大小并写入 .meta 校验信息",
+      "WebDAV 覆盖前保留上一版本副本，覆盖同步前在本地备份目录留存快照",
+      "远端备份被截断时自动修复最后一个完整记录并继续合并，单个数据项失败不再中断整轮同步",
+      "历史记录自动同步默认间隔调整为 60 分钟",
+    ],
+  },
   {
     date: "2026-09-13",
     version: "2.2.3",
