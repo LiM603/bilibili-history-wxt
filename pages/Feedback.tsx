@@ -1,4 +1,4 @@
-import { UPDATE_HISTORY } from "../utils/constants";
+const ISSUES_URL = "https://github.com/LiM603/bilibili-history-wxt/issues";
 
 const Feedback = () => {
   return (
@@ -6,14 +6,19 @@ const Feedback = () => {
       <h2 className="text-3xl font-semibold mb-3">建议反馈</h2>
 
       <section className="mt-10">
-        <h2 className="text-xl mb-3">交流群</h2>
-        <img src="/qrcode.jpg" alt="交流群" className="w-48 h-48 mx-auto" />
-        <p className="text-center text-gray-600 text-sm mt-2">
-          添加我们的微信，备注"Bilibili 无限历史记录", 拉你进群。
+        <h2 className="text-xl mb-3">GitHub Issues</h2>
+        <p className="text-gray-600 dark:text-neutral-400 text-base mb-4">
+          自用版的问题与建议请通过 GitHub Issues 提交。
         </p>
-        <p className="text-center text-gray-600 text-sm mt-2">
-          有任何建议和反馈都可以在群里提出, 反馈更迅速。
-        </p>
+        <a
+          href={ISSUES_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-pink-500 text-white font-medium transition-colors hover:bg-pink-600"
+        >
+          打开 GitHub Issues
+        </a>
+        <p className="text-gray-500 dark:text-neutral-500 text-sm mt-4 break-all">{ISSUES_URL}</p>
       </section>
     </div>
   );

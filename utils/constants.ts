@@ -19,7 +19,6 @@ export const FAV_SYNC_TIME_REMAIN = "favSyncTimeRemain"; // 单位：分钟
 export const FAVORITE_FOLDER_SYNC_PROGRESS = "favoriteFolderSyncProgress";
 export const ALL_FAVORITE_FOLDERS_SYNC_PROGRESS = "allFavoriteFoldersSyncProgress";
 
-export const HIDE_USER_INFO = "hideUserInfo";
 export const HIDDEN_MENUS = "hiddenMenus"; // Array of hidden titles
 export const DATE_SELECTION_MODE = "date_selection_mode";
 export const GRID_COLUMNS = "gridColumns";
@@ -104,6 +103,15 @@ export const DELETED_HISTORY_IDS = "deletedHistoryIds";
 export const THEME_MODE = "themeMode";
 
 export const UPDATE_HISTORY = [
+  {
+    date: "2026-10-05",
+    version: "4.0.0",
+    changes: [
+      "与上游项目 mundane799699/bilibili-history-wxt 分离，作为自用分支独立维护，版本号提升至 4.0.0",
+      "移除自建云同步、赞赏与用户登录相关的页面、入口与依赖，聚焦本地保存与 WebDAV 同步",
+      "关于页与欢迎页更新项目说明、开源署名与继承关系，反馈渠道改为 GitHub Issues",
+    ],
+  },
   {
     date: "2026-10-03",
     version: "2.2.4",

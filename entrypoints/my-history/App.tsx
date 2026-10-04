@@ -7,14 +7,12 @@ import Settings from "../../pages/Settings";
 import ScrollToTopButton from "../../components/ScrollToTopButton";
 import toast, { Toaster } from "react-hot-toast";
 import Feedback from "../../pages/Feedback";
-import CloudSync from "../../pages/CloudSync";
 import WebDavSync from "../../pages/WebDavSync";
 import SearchMusic from "../../pages/music/SearchMusic";
 import LikedMusic from "../../pages/music/LikedMusic";
 import { Favorites } from "../../pages/Favorites";
 import Welcome from "../../pages/Welcome";
 import AISearch from "../../pages/AISearch";
-import Reward from "../../pages/Reward";
 import { UpdateNoticeModal } from "../../components/UpdateNoticeModal";
 import { DataBackupReminderModal } from "../../components/DataBackupReminderModal";
 import { FirstRunGuideModal } from "../../components/FirstRunGuideModal";
@@ -244,9 +242,7 @@ const App = () => {
             <Route path="/about" element={<About />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/feedback" element={<Feedback />} />
-            <Route path="/cloud-sync" element={<CloudSync />} />
             <Route path="/webdav-sync" element={<WebDavSync />} />
-            <Route path="/reward" element={<Reward />} />
             <Route path="/favorites" element={<Favorites />} />
             <Route path="/collections" element={<SubscribedCollections />} />
             <Route path="/ai-search" element={<AISearch />} />
